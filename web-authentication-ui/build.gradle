@@ -1,0 +1,98 @@
+plugins {
+    id("com.android.library")
+    id("kotlin-android")
+    id("kotlin-parcelize")
+}
+
+apply plugin: 'org.jetbrains.kotlin.plugin.serialization'
+apply plugin: 'org.jetbrains.dokka'
+apply plugin: 'com.vanniktech.maven.publish.base'
+apply plugin: 'binary-compatibility-validator'
+
+def copyKotlinTemplates = tasks.register('copyKotlinTemplates', Copy) {
+    from("src/main/kotlinTemplates")
+    into("$buildDir/generated/sources/kotlinTemplates")
+    expand(projectVersion: project.version)
+}
+
+android {
+    compileSdkVersion build_versions.compile_sdk
+
+    defaultConfig {
+        minSdkVersion build_versions.min_sdk
+        targetSdkVersion build_versions.target_sdk
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        consumerProguardFiles "consumer-rules.pro"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+    kotlinOptions {
+        jvmTarget = '11'
+        freeCompilerArgs += ["-Xopt-in=com.okta.authfoundation.InternalAuthFoundationApi"]
+    }
+    buildFeatures {
+        buildConfig = false
+    }
+
+    testVariants.all {
+        it.mergedFlavor.manifestPlaceholders = [webAuthenticationRedirectScheme: "unitTest"]
+    }
+
+    unitTestVariants.all {
+        it.mergedFlavor.manifestPlaceholders = [webAuthenticationRedirectScheme: "unitTest"]
+    }
+
+    testOptions {
+        unitTests {
+            includeAndroidResources = true
+        }
+    }
+
+    sourceSets {
+        main {
+            kotlin.srcDir(copyKotlinTemplates.get().outputs)
+        }
+    }
+    namespace 'com.okta.webauthenticationui'
+}
+
+dependencies {
+    api deps.kotlin.stdlib
+    api deps.okhttp.core
+    api deps.okio.core
+    api deps.coroutines.android
+    api deps.kotlin.serialization_json
+    api project(':auth-foundation')
+    api project(':oauth2')
+    api deps.androidx_browser
+
+    implementation deps.lifecycle.viewmodel_ktx
+    implementation deps.androidx_activity_ktx
+    implementation deps.app_compat
+    implementation deps.okio.jvm
+
+    testImplementation deps.junit
+    testImplementation deps.truth
+    testImplementation deps.kotlin.test
+    testImplementation deps.coroutines.test
+    testImplementation deps.robolectric
+    testImplementation deps.androidx_test.core
+    testImplementation deps.androidx_test.core_ktx
+    testImplementation deps.mockito.core
+    testImplementation deps.mockito.kotlin
+    testImplementation deps.mockk.android
+    testImplementation deps.mockk.agent
+    testImplementation project(':test-helpers')
+}
+
+preBuild.dependsOn(copyKotlinTemplates)

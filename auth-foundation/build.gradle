@@ -1,0 +1,114 @@
+plugins {
+    id 'com.google.devtools.ksp'
+    id 'com.android.library'
+    id 'kotlin-android'
+    id 'kotlin-parcelize'
+}
+
+apply plugin: 'org.jetbrains.kotlin.plugin.serialization'
+apply plugin: 'org.jetbrains.dokka'
+apply plugin: 'com.vanniktech.maven.publish.base'
+apply plugin: 'binary-compatibility-validator'
+
+def copyKotlinTemplates = tasks.register('copyKotlinTemplates', Copy) {
+    from("src/main/kotlinTemplates")
+    into("$buildDir/generated/sources/kotlinTemplates")
+    expand(projectVersion: project.version)
+}
+
+android {
+    compileSdkVersion build_versions.compile_sdk
+
+    defaultConfig {
+        minSdkVersion build_versions.min_sdk
+        targetSdkVersion build_versions.target_sdk
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        consumerProguardFiles "consumer-rules.pro"
+
+        ksp {
+            arg("room.generateKotlin", "true")
+            arg("room.schemaLocation", "$projectDir/schemas")
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    compileOptions {
+        coreLibraryDesugaringEnabled true
+
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+    kotlinOptions {
+        jvmTarget = '11'
+        freeCompilerArgs += ["-Xopt-in=kotlin.RequiresOptIn", "-Xopt-in=com.okta.authfoundation.InternalAuthFoundationApi"]
+    }
+    buildFeatures {
+        buildConfig = false
+    }
+
+    sourceSets {
+        main {
+            kotlin.srcDir(copyKotlinTemplates.get().outputs)
+        }
+    }
+    namespace 'com.okta.authfoundation'
+}
+
+dependencies {
+    coreLibraryDesugaring deps.core_library_desugaring
+
+    api deps.kotlin.stdlib
+    api deps.okhttp.core
+    api deps.coroutines.core
+    api deps.kotlin.serialization_json
+    api deps.okio.core
+    api deps.androidx_biometric
+
+    implementation deps.lifecycle.viewmodel_ktx
+    implementation deps.androidx_activity_ktx
+    implementation deps.androidx_constraintlayout
+    implementation deps.androidx_sqlite
+    implementation deps.app_compat
+    implementation deps.okio.jvm
+    implementation deps.kotlin.serialization_okio
+    implementation deps.security_crypto
+    implementation deps.startup_runtime
+    implementation deps.room.runtime
+    implementation deps.room.ktx
+    implementation deps.sqlcipher_android
+    annotationProcessor deps.room.compiler
+    ksp deps.room.compiler
+
+    testImplementation deps.coroutines.test
+    testImplementation deps.androidx_test.core
+    testImplementation deps.androidx_test.ext_junit
+    testImplementation deps.junit
+    testImplementation deps.truth
+    testImplementation deps.kotlin.test
+    testImplementation deps.mockito.core
+    testImplementation deps.mockito.kotlin
+    testImplementation deps.mockk.android
+    testImplementation deps.mockk.agent
+    testImplementation deps.robolectric
+    testImplementation deps.room.testing
+    testImplementation deps.turbine
+    testImplementation project(':test-helpers')
+
+    androidTestImplementation deps.junit
+    androidTestImplementation deps.truth
+    androidTestImplementation deps.kotlin.test
+    androidTestImplementation deps.androidx_test.core
+    androidTestImplementation deps.androidx_test.ext_junit
+    androidTestImplementation deps.androidx_test.runner
+    androidTestImplementation deps.androidx_test.rules
+    androidTestImplementation deps.coroutines.test
+    androidTestImplementation project(':test-helpers')
+}
+
+preBuild.dependsOn(copyKotlinTemplates)
