@@ -1,0 +1,230 @@
+/*
+ * Copyright 2022-Present Okta, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.okta.authfoundation.credential.kmp
+
+import com.okta.authfoundation.client.kmp.OAuth2Client
+import com.okta.authfoundation.credential.TokenMetadata
+import com.okta.authfoundation.credential.events.CredentialCreatedEvent
+import com.okta.authfoundation.credential.events.DefaultCredentialChangedEvent
+import com.okta.authfoundation.events.Event
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+
+/**
+ * Cross-platform credential manager providing CRUD operations for credentials.
+ *
+ * Holds the shared dependencies ([client], [storage], [defaultIdStore])
+ * so callers don't need to pass them on every operation.
+ *
+ * Credential lifecycle events are emitted on [events]. All active collectors receive every event
+ * independently. There is no replay; events emitted before a collector subscribes are not delivered.
+ *
+ * @param client The [OAuth2Client] used for token operations.
+ * @param storage The [TokenStorage] for persisting tokens.
+ * @param defaultIdStore Store for the default credential ID.
+ * @param onStorageError Optional callback invoked when a storage operation throws. Return `true`
+ *   to retry the failed operation once; return `false` (or omit) to rethrow. The decision is based
+ *   on the thrown [Exception], for example:
+ *   ```kotlin
+ *   onStorageError = { e -> e is android.database.sqlite.SQLiteException }
+ *   ```
+ */
+class TokenCredentialManager(
+    val client: OAuth2Client,
+    storage: TokenStorage,
+    val defaultIdStore: DefaultCredentialIdStore,
+    val onStorageError: ((Exception) -> Boolean)? = null,
+) {
+    private val _events =
+        MutableSharedFlow<Event>(
+            replay = 0,
+            extraBufferCapacity = 64,
+            onBufferOverflow = BufferOverflow.DROP_OLDEST
+        )
+
+    internal val dataSource = CredentialDataSource(storage, _events, onStorageError)
+
+    /**
+     * A read-only flow of credential lifecycle events emitted by this manager.
+     *
+     * Events are multicast — all active collectors receive every event independently.
+     * There is no replay; events emitted before a collector subscribes are not delivered.
+     * When no collectors are active, events are silently dropped (fire-and-forget semantics).
+     * The emitter is never suspended; if the buffer is full, the oldest event is dropped.
+     */
+    val events: SharedFlow<Event> = _events.asSharedFlow()
+
+    /**
+     * Stores a new credential with the given [token] and optional [tags].
+     *
+     * @return [Result.success] with the stored [Credential], or [Result.failure] wrapping any
+     * exception thrown while persisting the credential to storage.
+     */
+    suspend fun store(
+        token: TokenData,
+        tags: Map<String, String> = emptyMap(),
+    ): Result<Credential> =
+        runCatching {
+            val stored = dataSource.createToken(token, tags)
+            val credential =
+                CredentialImpl(
+                    token = stored,
+                    client = client,
+                    tags = tags,
+                    dataSource = dataSource,
+                    events = _events,
+                    defaultIdStore = defaultIdStore
+                )
+            _events.tryEmit(CredentialCreatedEvent(credential))
+            credential
+        }
+
+    /**
+     * Retrieves a credential by its [id].
+     *
+     * Use this when you already know the credential ID (e.g., stored in app preferences).
+     * To retrieve the "current user" credential without tracking the ID, use [getDefault] instead.
+     *
+     * @return [Result.success] with the [Credential], or null if not found.
+     * @see getDefault
+     */
+    suspend fun get(id: String): Result<Credential?> =
+        runCatching {
+            val token = dataSource.getToken(id) ?: return@runCatching null
+            if (token !is TokenData) return@runCatching null
+            val metadata = dataSource.metadata(id)
+            CredentialImpl(
+                token = token,
+                client = client,
+                tags = metadata?.tags ?: emptyMap(),
+                dataSource = dataSource,
+                events = _events,
+                defaultIdStore = defaultIdStore
+            )
+        }
+
+    /**
+     * Returns IDs of all stored credentials.
+     */
+    suspend fun allIds(): Result<List<String>> = runCatching { dataSource.allIds() }
+
+    /**
+     * Returns metadata for the credential with [id].
+     */
+    suspend fun metadata(id: String): Result<TokenMetadata?> = runCatching { dataSource.metadata(id) }
+
+    /**
+     * Updates metadata for an existing credential.
+     */
+    suspend fun setMetadata(metadata: TokenMetadata): Result<Unit> = runCatching { dataSource.setMetadata(metadata) }
+
+    /**
+     * Returns the default credential, or null if no default has been set.
+     *
+     * The default credential is set via [setDefault]. This is a convenience for apps with a
+     * "current user" concept — store once with [setDefault], retrieve later without tracking
+     * the credential ID. To retrieve a credential by a known ID, use [get] instead.
+     *
+     * @return [Result.success] with the default [Credential], or null if no default is set
+     *   or the default credential no longer exists in storage.
+     * @see setDefault
+     * @see get
+     */
+    suspend fun getDefault(): Result<Credential?> =
+        runCatching {
+            val defaultId = defaultIdStore.getDefaultCredentialId().getOrThrow() ?: return@runCatching null
+            val token = dataSource.getToken(defaultId) ?: return@runCatching null
+            if (token !is TokenData) return@runCatching null
+            val metadata = dataSource.metadata(defaultId)
+            CredentialImpl(
+                token = token,
+                client = client,
+                tags = metadata?.tags ?: emptyMap(),
+                dataSource = dataSource,
+                events = _events,
+                defaultIdStore = defaultIdStore
+            )
+        }
+
+    /**
+     * Sets or clears the default credential.
+     *
+     * @param credential The credential to set as default, or null to clear.
+     */
+    suspend fun setDefault(credential: Credential?): Result<Unit> =
+        runCatching {
+            if (credential != null) {
+                defaultIdStore.setDefaultCredentialId(credential.id).getOrThrow()
+                _events.tryEmit(DefaultCredentialChangedEvent(credential))
+            } else {
+                defaultIdStore.clearDefaultCredentialId().getOrThrow()
+                _events.tryEmit(DefaultCredentialChangedEvent(null))
+            }
+        }
+
+    /**
+     * Returns all credentials matching the given [where] predicate.
+     *
+     * @param where a function that receives [TokenMetadata] and returns true for credentials to include.
+     */
+    suspend fun find(where: (TokenMetadata) -> Boolean): Result<List<Credential>> =
+        runCatching {
+            dataSource
+                .allIds()
+                .mapNotNull { dataSource.metadata(it) }
+                .filter { where(it) }
+                .mapNotNull { metadata ->
+                    val token = dataSource.getToken(metadata.id) ?: return@mapNotNull null
+                    if (token !is TokenData) return@mapNotNull null
+                    CredentialImpl(
+                        token = token,
+                        client = client,
+                        tags = metadata.tags,
+                        dataSource = dataSource,
+                        events = _events,
+                        defaultIdStore = defaultIdStore
+                    )
+                }
+        }
+
+    /**
+     * Returns all credentials matching the given [predicate].
+     *
+     * @param predicate a function that receives [Credential] and returns true for credentials to include.
+     */
+    @JvmName("findByCredential")
+    suspend fun find(predicate: (Credential) -> Boolean): Result<List<Credential>> =
+        runCatching {
+            val allIds = dataSource.allIds()
+            allIds.mapNotNull { id ->
+                val token = dataSource.getToken(id) ?: return@mapNotNull null
+                if (token !is TokenData) return@mapNotNull null
+                val metadata = dataSource.metadata(id)
+                val credential =
+                    CredentialImpl(
+                        token = token,
+                        client = client,
+                        tags = metadata?.tags ?: emptyMap(),
+                        dataSource = dataSource,
+                        events = _events,
+                        defaultIdStore = defaultIdStore
+                    )
+                if (predicate(credential)) credential else null
+            }
+        }
+}
