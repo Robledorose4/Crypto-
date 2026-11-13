@@ -1,0 +1,85 @@
+/*
+ * Copyright 2022-Present Okta, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.okta.directauth
+
+import com.okta.directauth.api.DirectAuthenticationFlow
+import com.okta.directauth.http.DirectAuthOobAuthenticateRequest
+import com.okta.directauth.http.DirectAuthPrimaryAuthenticateRequest
+import com.okta.directauth.http.DirectAuthTokenRequest
+import com.okta.directauth.http.EXCEPTION
+import com.okta.directauth.http.handlers.OobStepHandler
+import com.okta.directauth.http.handlers.PrimaryAuthenticateStepHandler
+import com.okta.directauth.http.handlers.StepHandler
+import com.okta.directauth.http.handlers.TokenStepHandler
+import com.okta.directauth.model.DirectAuthenticationContext
+import com.okta.directauth.model.DirectAuthenticationError
+import com.okta.directauth.model.DirectAuthenticationState
+import com.okta.directauth.model.PrimaryFactor
+import com.okta.directauth.model.endpointUrl
+import com.okta.directauth.model.resolveClientAssertion
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlin.coroutines.cancellation.CancellationException
+
+internal class DirectAuthenticationFlowImpl(
+    internal val context: DirectAuthenticationContext,
+) : DirectAuthenticationFlow {
+    private suspend fun PrimaryFactor.startRequest(loginHint: String): StepHandler =
+        when (this) {
+            is PrimaryFactor.Password -> {
+                val clientAssertion = context.resolveClientAssertion(context.endpointUrl("token"))
+                TokenStepHandler(DirectAuthTokenRequest.Password(context, loginHint, password, clientAssertion), context)
+            }
+
+            is PrimaryFactor.Oob -> {
+                val clientAssertion = context.resolveClientAssertion(context.endpointUrl("oob-authenticate"))
+                OobStepHandler(DirectAuthOobAuthenticateRequest(context, loginHint, channel, clientAssertion), context)
+            }
+
+            is PrimaryFactor.Otp -> {
+                val clientAssertion = context.resolveClientAssertion(context.endpointUrl("token"))
+                TokenStepHandler(DirectAuthTokenRequest.Otp(context, loginHint, passCode, clientAssertion), context)
+            }
+
+            PrimaryFactor.WebAuthn -> {
+                val clientAssertion = context.resolveClientAssertion(context.endpointUrl("primary-authenticate"))
+                PrimaryAuthenticateStepHandler(DirectAuthPrimaryAuthenticateRequest(context, loginHint, clientAssertion), context)
+            }
+        }
+
+    override val authenticationState: StateFlow<DirectAuthenticationState> = context.authenticationStateFlow.asStateFlow()
+
+    override suspend fun start(
+        loginHint: String,
+        primaryFactor: PrimaryFactor,
+    ): DirectAuthenticationState {
+        val result =
+            runCatching { primaryFactor.startRequest(loginHint).process() }.getOrElse {
+                if (it is CancellationException) {
+                    DirectAuthenticationState.Canceled
+                } else {
+                    DirectAuthenticationError.InternalError(EXCEPTION, it.message, it)
+                }
+            }
+        context.authenticationStateFlow.value = result
+        return result
+    }
+
+    override fun reset(): DirectAuthenticationState {
+        context.authenticationStateFlow.value = DirectAuthenticationState.Idle
+        return DirectAuthenticationState.Idle
+    }
+}
