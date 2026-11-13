@@ -1,0 +1,214 @@
+/*
+ * Copyright 2022-Present Okta, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.okta.directauth.jvm
+
+import com.okta.authfoundation.ChallengeGrantType
+import com.okta.authfoundation.GrantType
+import com.okta.authfoundation.api.http.ApiExecutor
+import com.okta.authfoundation.api.log.AuthFoundationLogger
+import com.okta.authfoundation.client.ClientAssertionProvider
+import com.okta.authfoundation.client.OidcClock
+import com.okta.directauth.model.DirectAuthenticationIntent
+import kotlin.coroutines.CoroutineContext
+import com.okta.directauth.DirectAuthenticationFlowBuilder as KotlinBuilder
+
+/**
+ * A Java-idiomatic builder for creating instances of [DirectAuthenticationFlow].
+ *
+ * This builder provides method-chaining setters for optional parameters and delegates
+ * to the Kotlin [KotlinBuilder] for the actual construction.
+ *
+ * Kotlin callers should use [com.okta.directauth.DirectAuthenticationFlowBuilder] instead.
+ *
+ * @param issuerUrl The base URL of the Authorization Server.
+ * @param clientId The client ID of the application.
+ * @param scope The OAuth 2.0 scopes the application is requesting.
+ */
+class DirectAuthenticationFlowBuilder(
+    private val issuerUrl: String,
+    private val clientId: String,
+    private val scope: List<String>,
+) {
+    private var authorizationServerId: String = ""
+    private var clientSecret: String = ""
+    private var clientAssertionProvider: ClientAssertionProvider? = null
+    private var computeDispatcher: CoroutineContext? = null
+    private var intent: DirectAuthenticationIntent = DirectAuthenticationIntent.SIGN_IN
+    private var supportedGrantTypes: List<GrantType> =
+        listOf(
+            GrantType.Password,
+            GrantType.Oob,
+            GrantType.Otp,
+            ChallengeGrantType.OobMfa,
+            ChallengeGrantType.OtpMfa,
+            GrantType.WebAuthn,
+            ChallengeGrantType.WebAuthnMfa
+        )
+    private var acrValues: List<String> = emptyList()
+    private var apiExecutor: ApiExecutor? = null
+    private var logger: AuthFoundationLogger? = null
+    private var clock: OidcClock? = null
+    private var additionalParameters: Map<String, String> = emptyMap()
+
+    /**
+     * Sets the authorization server ID.
+     *
+     * @param authorizationServerId The ID of the authorization server.
+     * @return This builder for chaining.
+     */
+    fun setAuthorizationServerId(authorizationServerId: String): DirectAuthenticationFlowBuilder =
+        apply {
+            this.authorizationServerId = authorizationServerId
+        }
+
+    /**
+     * Sets the client secret.
+     *
+     * @param clientSecret The client secret of the application.
+     * @return This builder for chaining.
+     */
+    fun setClientSecret(clientSecret: String): DirectAuthenticationFlowBuilder =
+        apply {
+            this.clientSecret = clientSecret
+        }
+
+    /**
+     * Sets the provider for private_key_jwt (or similar JWT-based) client authentication.
+     *
+     * Invoked fresh for every client-authenticated request this flow makes — including each
+     * iteration of an OOB poll — so the returned assertion can carry a unique `jti` and a
+     * correctly scoped `aud`/`exp`. Cannot be combined with [setClientSecret].
+     *
+     * @param clientAssertionProvider The [ClientAssertionProvider] to use.
+     * @return This builder for chaining.
+     */
+    fun setClientAssertionProvider(clientAssertionProvider: ClientAssertionProvider): DirectAuthenticationFlowBuilder =
+        apply {
+            this.clientAssertionProvider = clientAssertionProvider
+        }
+
+    /**
+     * Sets the dispatcher used for CPU-bound work, such as invoking the [ClientAssertionProvider]
+     * set via [setClientAssertionProvider].
+     *
+     * @param dispatcher The [CoroutineContext] for computation.
+     * @return This builder for chaining.
+     */
+    fun setComputeDispatcher(dispatcher: CoroutineContext): DirectAuthenticationFlowBuilder =
+        apply {
+            this.computeDispatcher = dispatcher
+        }
+
+    /**
+     * Sets the authentication intent.
+     *
+     * @param intent The intended user action for the flow.
+     * @return This builder for chaining.
+     */
+    fun setIntent(intent: DirectAuthenticationIntent): DirectAuthenticationFlowBuilder =
+        apply {
+            this.intent = intent
+        }
+
+    /**
+     * Sets the supported grant types.
+     *
+     * @param supportedGrantTypes The list of grant types the client supports.
+     * @return This builder for chaining.
+     */
+    fun setSupportedGrantTypes(supportedGrantTypes: List<GrantType>): DirectAuthenticationFlowBuilder =
+        apply {
+            this.supportedGrantTypes = supportedGrantTypes
+        }
+
+    /**
+     * Sets the ACR values.
+     *
+     * @param acrValues A list of Authentication Context Class Reference values.
+     * @return This builder for chaining.
+     */
+    fun setAcrValues(acrValues: List<String>): DirectAuthenticationFlowBuilder =
+        apply {
+            this.acrValues = acrValues
+        }
+
+    /**
+     * Sets the HTTP client executor used to make network requests.
+     *
+     * @param apiExecutor The [ApiExecutor] to use.
+     * @return This builder for chaining.
+     */
+    fun setApiExecutor(apiExecutor: ApiExecutor): DirectAuthenticationFlowBuilder =
+        apply {
+            this.apiExecutor = apiExecutor
+        }
+
+    /**
+     * Sets the logger used by the SDK to output diagnostic information.
+     *
+     * @param logger The [AuthFoundationLogger] to use.
+     * @return This builder for chaining.
+     */
+    fun setLogger(logger: AuthFoundationLogger): DirectAuthenticationFlowBuilder =
+        apply {
+            this.logger = logger
+        }
+
+    /**
+     * Sets the clock used for time-sensitive operations.
+     *
+     * @param clock The [OidcClock] to use.
+     * @return This builder for chaining.
+     */
+    fun setClock(clock: OidcClock): DirectAuthenticationFlowBuilder =
+        apply {
+            this.clock = clock
+        }
+
+    /**
+     * Sets additional query string parameters for all requests.
+     *
+     * @param additionalParameters A map of additional parameters.
+     * @return This builder for chaining.
+     */
+    fun setAdditionalParameters(additionalParameters: Map<String, String>): DirectAuthenticationFlowBuilder =
+        apply {
+            this.additionalParameters = additionalParameters
+        }
+
+    /**
+     * Creates a [DirectAuthenticationFlow] instance with the configured parameters.
+     *
+     * @return A [DirectAuthResult] containing the [DirectAuthenticationFlow] on success, or an exception on failure.
+     */
+    fun build(): DirectAuthResult<DirectAuthenticationFlow> {
+        val kotlinResult =
+            KotlinBuilder.create(issuerUrl, clientId, scope) {
+                authorizationServerId = this@DirectAuthenticationFlowBuilder.authorizationServerId
+                clientSecret = this@DirectAuthenticationFlowBuilder.clientSecret
+                this@DirectAuthenticationFlowBuilder.clientAssertionProvider?.let { clientAssertionProvider = it }
+                this@DirectAuthenticationFlowBuilder.computeDispatcher?.let { computeDispatcher = it }
+                directAuthenticationIntent = this@DirectAuthenticationFlowBuilder.intent
+                supportedGrantType = this@DirectAuthenticationFlowBuilder.supportedGrantTypes
+                acrValues = this@DirectAuthenticationFlowBuilder.acrValues
+                this@DirectAuthenticationFlowBuilder.apiExecutor?.let { apiExecutor = it }
+                this@DirectAuthenticationFlowBuilder.logger?.let { logger = it }
+                this@DirectAuthenticationFlowBuilder.clock?.let { clock = it }
+                additionalParameter = this@DirectAuthenticationFlowBuilder.additionalParameters
+            }
+        return DirectAuthResult.fromKotlinResult(kotlinResult.map { DirectAuthenticationFlow(it) })
+    }
+}
