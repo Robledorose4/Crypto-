@@ -1,0 +1,22 @@
+buildscript {
+    apply from: 'versions.gradle'
+    addRepos(repositories)
+    forceVersions(configurations)
+
+    dependencies {
+        classpath deps.android_gradle_plugin
+        classpath deps.kotlin.plugin
+        classpath deps.navigation.safe_args_plugin
+        classpath deps.kotlin.serialization_plugin
+        classpath deps.gradle_maven_publish
+    }
+}
+
+allprojects {
+    addRepos(repositories)
+    forceVersions(configurations)
+}
+
+task clean(type: Delete) {
+    delete rootProject.buildDir
+}
