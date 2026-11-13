@@ -1,0 +1,653 @@
+# Okta Direct Authentication
+
+Authenticate users using Okta's Direct Authentication API and build native sign-in experiences with multifactor authentication (MFA) support.
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Getting Started](#getting-started)
+  - [Creating a Flow](#creating-a-flow)
+  - [Observing Authentication State](#observing-authentication-state)
+- [Authentication Flows](#authentication-flows)
+  - [Starting Authentication](#starting-authentication)
+  - [Handling MFA](#handling-mfa)
+  - [Handling Continuations](#handling-continuations)
+  - [Handling Errors](#handling-errors)
+  - [Resetting the Flow](#resetting-the-flow)
+- [Complete Example](#complete-example)
+- [Java Usage (CompletableFuture API)](#java-usage-completablefuture-api)
+- [Sample Applications](#sample-applications)
+- [Additional Resources](#additional-resources)
+
+## Overview
+
+This library provides the classes and methods needed to implement native, developer-directed sign-in flows that fit your application's user experience.
+
+Unlike browser-based authentication flows, Direct Authentication gives you full control over the UI while leveraging Okta's authentication backend. This enables you to build fully native sign-in experiences that support:
+
+- Password authentication
+- One-Time Passcode (OTP)
+- Out-of-Band authentication (Push, SMS, Voice)
+- WebAuthn/Passkeys
+- Multi-Factor authentication (MFA)
+- Self-Service Password Recovery (SSPR)
+
+## Requirements
+
+- Android API 26+ (Android target) or Java 11+ (JVM target) — you only need the one matching your platform
+- Okta org with Direct Authentication enabled
+- Client application configured for Direct Authentication grant types
+
+## Installation
+
+```kotlin
+dependencies {
+    implementation(platform("com.okta.kotlin:bom:3.2.0"))
+    implementation("com.okta.kotlin:auth-foundation")
+    implementation("com.okta.kotlin:okta-direct-auth")
+}
+```
+
+See the [CHANGELOG](CHANGELOG.md) for release history and migration guides.
+
+## Getting Started
+
+### Creating a Flow
+
+Create a `DirectAuthenticationFlow` instance using the builder. You'll need your Okta issuer URL, client ID, and the scopes you want to request:
+
+```kotlin
+import com.okta.directauth.DirectAuthenticationFlowBuilder
+import com.okta.directauth.api.DirectAuthenticationFlow
+
+val directAuth: DirectAuthenticationFlow =
+    DirectAuthenticationFlowBuilder
+        .create(
+            issuerUrl = "https://your-org.okta.com",
+            clientId = "your-client-id",
+            scope = listOf("openid", "profile", "email")
+        ) {
+            // Optional: specify authorization server ID for custom auth servers
+            authorizationServerId = "default"
+        }.getOrThrow()
+```
+
+If your application is registered as a confidential client, authenticate with either a client secret:
+
+```kotlin
+val confidentialFlow: DirectAuthenticationFlow =
+    DirectAuthenticationFlowBuilder
+        .create(
+            issuerUrl = "https://your-org.okta.com",
+            clientId = "your-client-id",
+            scope = listOf("openid", "profile", "email")
+        ) {
+            clientSecret = "your-client-secret"
+        }.getOrThrow()
+```
+
+...or, mutually exclusive with `clientSecret`, a `private_key_jwt` assertion provider. It's invoked fresh for every request the flow makes — including each iteration of an OOB poll — so the returned assertion can carry a unique `jti` and a correctly scoped, non-expired `exp`/`aud`:
+
+```kotlin
+import com.okta.authfoundation.client.ClientAssertion
+import com.okta.authfoundation.client.ClientAssertionProvider
+
+val confidentialFlow: DirectAuthenticationFlow =
+    DirectAuthenticationFlowBuilder
+        .create(
+            issuerUrl = "https://your-org.okta.com",
+            clientId = "your-client-id",
+            scope = listOf("openid", "profile", "email")
+        ) {
+            clientAssertionProvider =
+                ClientAssertionProvider { audience ->
+                    ClientAssertion(
+                        type = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+                        assertion = signJwt(issuer = "your-client-id", subject = "your-client-id", audience = audience)
+                    )
+                }
+        }.getOrThrow()
+```
+
+For self-service password recovery flows, create a separate flow with the recovery intent:
+
+```kotlin
+import com.okta.directauth.model.DirectAuthenticationIntent
+
+val recoveryFlow: DirectAuthenticationFlow =
+    DirectAuthenticationFlowBuilder
+        .create(
+            issuerUrl = "https://your-org.okta.com",
+            clientId = "your-client-id",
+            scope = listOf("okta.myAccount.password.manage")
+        ) {
+            directAuthenticationIntent = DirectAuthenticationIntent.RECOVERY
+        }.getOrThrow()
+```
+
+### Observing Authentication State
+
+The `DirectAuthenticationFlow` exposes a `StateFlow` that emits authentication state changes. Observe this flow in your ViewModel or Activity:
+
+```kotlin
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.launch
+
+viewModelScope.launch {
+    directAuth.authenticationState.collect { state ->
+        when (state) {
+            is DirectAuthenticationState.Idle -> {
+                // Ready to start authentication
+            }
+            is DirectAuthenticationState.MfaRequired -> {
+                // Primary auth succeeded, MFA required
+            }
+            is DirectAuthenticationState.Authenticated -> {
+                // Success! Access tokens available
+                val accessToken = state.token.accessToken
+                val idToken = state.token.idToken
+            }
+            is DirectAuthenticationState.Canceled -> {
+                // Authentication was canceled
+            }
+            is DirectAuthContinuation.OobPending -> {
+                // Waiting for out-of-band verification (push, SMS, voice)
+            }
+            is DirectAuthContinuation.Prompt -> {
+                // Server requires additional input
+            }
+            is DirectAuthContinuation.Transfer -> {
+                // Device transfer with binding code
+            }
+            is DirectAuthContinuation.WebAuthn -> {
+                // WebAuthn/Passkey challenge, perform platform ceremony
+            }
+            is DirectAuthenticationError -> {
+                // Handle error
+            }
+        }
+    }
+}
+```
+
+## Authentication Flows
+
+### Starting Authentication
+
+Start authentication by calling `start()` with a username and primary factor:
+
+#### Password Authentication
+
+```kotlin
+import com.okta.directauth.model.PrimaryFactor
+
+directAuth.start(
+    loginHint = "user@example.com",
+    primaryFactor = PrimaryFactor.Password("user-password")
+)
+```
+
+#### OTP Authentication
+
+```kotlin
+directAuth.start(
+    loginHint = "user@example.com",
+    primaryFactor = PrimaryFactor.Otp("123456")
+)
+```
+
+#### Out-of-Band Authentication (Push, SMS, Voice)
+
+```kotlin
+import com.okta.directauth.model.OobChannel
+
+// Okta Verify Push
+directAuth.start(
+    loginHint = "user@example.com",
+    primaryFactor = PrimaryFactor.Oob(OobChannel.PUSH)
+)
+
+// SMS
+directAuth.start(
+    loginHint = "user@example.com",
+    primaryFactor = PrimaryFactor.Oob(OobChannel.SMS)
+)
+
+// Voice Call
+directAuth.start(
+    loginHint = "user@example.com",
+    primaryFactor = PrimaryFactor.Oob(OobChannel.VOICE)
+)
+```
+
+#### WebAuthn/Passkeys
+
+```kotlin
+directAuth.start(
+    loginHint = "user@example.com",
+    primaryFactor = PrimaryFactor.WebAuthn
+)
+```
+
+### Handling MFA
+
+When primary authentication succeeds but MFA is required, the flow emits `DirectAuthenticationState.MfaRequired`. Resume the flow with a secondary factor:
+
+```kotlin
+import com.okta.authfoundation.ChallengeGrantType
+
+when (val state = directAuth.authenticationState.value) {
+    is DirectAuthenticationState.MfaRequired -> {
+        // Resume with OTP
+        state.resume(
+            secondaryFactor = PrimaryFactor.Otp("123456"),
+            challengeTypesSupported = listOf(ChallengeGrantType.OtpMfa)
+        )
+
+        // Or resume with Push notification
+        state.resume(
+            secondaryFactor = PrimaryFactor.Oob(OobChannel.PUSH),
+            challengeTypesSupported = listOf(ChallengeGrantType.OobMfa)
+        )
+
+        // Or resume with WebAuthn
+        state.resume(
+            secondaryFactor = PrimaryFactor.WebAuthn,
+            challengeTypesSupported = listOf(ChallengeGrantType.WebAuthnMfa)
+        )
+    }
+}
+```
+
+### Handling Continuations
+
+#### Out-of-Band Pending
+
+When using push notifications, SMS, or voice authentication, the flow enters an `OobPending` state while waiting for the user to complete verification on their device:
+
+```kotlin
+when (val state = directAuth.authenticationState.value) {
+    is DirectAuthContinuation.OobPending -> {
+        // Show polling UI with countdown
+        val expiresInSeconds = state.expirationInSeconds
+
+        // Poll for completion
+        state.proceed()
+    }
+}
+```
+
+#### Device Transfer
+
+When authenticating with Okta Verify that requires a number challenge, the user must verify a binding code on their registered device:
+
+```kotlin
+when (val state = directAuth.authenticationState.value) {
+    is DirectAuthContinuation.Transfer -> {
+        // Display the binding code to the user
+        val bindingCode = state.bindingCode
+        val expiresInSeconds = state.expirationInSeconds
+
+        // Poll for completion after user verifies on their device
+        state.proceed()
+    }
+}
+```
+
+#### Prompts
+
+When authentication requires additional input during authentication:
+
+```kotlin
+when (val state = directAuth.authenticationState.value) {
+    is DirectAuthContinuation.Prompt -> {
+        // Collect additional code from user and proceed
+        state.proceed(code = "user-entered-code")
+    }
+}
+```
+
+#### WebAuthn/Passkeys
+
+When using WebAuthn (either as a primary factor or MFA), the flow enters a `WebAuthn` state with the server's challenge data. There are two ways to proceed:
+
+**Recommended: Using a `WebAuthnCeremonyHandler`**
+
+The SDK provides `AndroidWebAuthnCeremonyHandler` for Android, which uses the Credential Manager API to perform the platform ceremony:
+
+```kotlin
+import com.okta.directauth.webauthn.AndroidWebAuthnCeremonyHandler
+
+when (val state = directAuth.authenticationState.value) {
+    is DirectAuthContinuation.WebAuthn -> {
+        val handler = AndroidWebAuthnCeremonyHandler(activity)
+        state.proceed(handler)
+    }
+}
+```
+
+**Manual: Performing the ceremony yourself**
+
+If you need full control over the WebAuthn ceremony, perform it yourself and pass the assertion response:
+
+```kotlin
+import com.okta.directauth.model.WebAuthnAssertionResponse
+
+when (val state = directAuth.authenticationState.value) {
+    is DirectAuthContinuation.WebAuthn -> {
+        val challengeData = state.challengeData().getOrThrow() // Raw JSON for the platform API
+        // ... perform platform WebAuthn ceremony ...
+        val response = WebAuthnAssertionResponse(
+            clientDataJSON = clientDataJSON,
+            authenticatorData = authenticatorData,
+            signature = signature,
+            userHandle = userHandle
+        )
+        state.proceed(response)
+    }
+}
+```
+
+### Handling Errors
+
+Authentication errors are emitted as `DirectAuthenticationError`:
+
+```kotlin
+when (val state = directAuth.authenticationState.value) {
+    is DirectAuthenticationError -> {
+        when (state) {
+            is DirectAuthenticationError.HttpError.Oauth2Error -> {
+                val error = state.error
+                val errorDescription = state.errorDescription
+                val statusCode = state.httpStatusCode
+            }
+            is DirectAuthenticationError.HttpError.ApiError -> {
+                val errorCode = state.errorCode
+                val errorSummary = state.errorSummary
+                val statusCode = state.httpStatusCode
+            }
+            is DirectAuthenticationError.InternalError -> {
+                val errorCode = state.errorCode
+                val throwable = state.throwable
+            }
+        }
+    }
+}
+```
+
+### Resetting the Flow
+
+Reset the authentication flow to start over:
+
+```kotlin
+directAuth.reset()
+```
+
+Call `reset()` when:
+- User wants to start over with a different username
+- Recovering from an unrecoverable error
+- User cancels an ongoing operation
+
+## Complete Example
+
+Here's a complete ViewModel example demonstrating the authentication flow:
+
+```kotlin
+class AuthViewModel : ViewModel() {
+
+    private val directAuth = DirectAuthenticationFlowBuilder
+        .create(
+            issuerUrl = BuildConfig.ISSUER,
+            clientId = BuildConfig.CLIENT_ID,
+            scope = listOf("openid", "profile", "email")
+        ).getOrThrow()
+
+    val authState = directAuth.authenticationState
+
+    fun signInWithPassword(username: String, password: String) {
+        viewModelScope.launch {
+            directAuth.start(username, PrimaryFactor.Password(password))
+        }
+    }
+
+    fun signInWithOtp(username: String, otp: String) {
+        viewModelScope.launch {
+            directAuth.start(username, PrimaryFactor.Otp(otp))
+        }
+    }
+
+    fun signInWithPush(username: String) {
+        viewModelScope.launch {
+            directAuth.start(username, PrimaryFactor.Oob(OobChannel.PUSH))
+        }
+    }
+
+    fun resumeMfaWithOtp(mfaRequired: DirectAuthenticationState.MfaRequired, otp: String) {
+        viewModelScope.launch {
+            mfaRequired.resume(
+                PrimaryFactor.Otp(otp),
+                listOf(ChallengeGrantType.OtpMfa)
+            )
+        }
+    }
+
+    fun resumeMfaWithPush(mfaRequired: DirectAuthenticationState.MfaRequired) {
+        viewModelScope.launch {
+            mfaRequired.resume(
+                PrimaryFactor.Oob(OobChannel.PUSH),
+                listOf(ChallengeGrantType.OobMfa)
+            )
+        }
+    }
+
+    fun pollOobPending(oobPending: DirectAuthContinuation.OobPending) {
+        viewModelScope.launch {
+            oobPending.proceed()
+        }
+    }
+
+    fun handleTransfer(transfer: DirectAuthContinuation.Transfer) {
+        viewModelScope.launch {
+            transfer.proceed()
+        }
+    }
+
+    fun submitPrompt(prompt: DirectAuthContinuation.Prompt, code: String) {
+        viewModelScope.launch {
+            prompt.proceed(code)
+        }
+    }
+
+    fun signInWithWebAuthn(username: String) {
+        viewModelScope.launch {
+            directAuth.start(username, PrimaryFactor.WebAuthn)
+        }
+    }
+
+    fun handleWebAuthn(webAuthn: DirectAuthContinuation.WebAuthn, handler: WebAuthnCeremonyHandler) {
+        viewModelScope.launch {
+            webAuthn.proceed(handler)
+        }
+    }
+
+    fun reset() {
+        directAuth.reset()
+    }
+}
+```
+
+## Java Usage (CompletableFuture API)
+
+The `okta-direct-auth` module provides a Java-compatible API using `CompletableFuture` for projects that cannot use Kotlin coroutines. All JVM wrapper classes are in the `com.okta.directauth.jvm` package.
+
+### Creating a Flow (Java)
+
+```java
+import com.okta.directauth.jvm.DirectAuthResult;
+import com.okta.directauth.jvm.DirectAuthenticationFlow;
+import com.okta.directauth.jvm.DirectAuthenticationFlowBuilder;
+import com.okta.directauth.model.DirectAuthenticationIntent;
+import java.util.List;
+
+DirectAuthResult<DirectAuthenticationFlow> result =
+    new DirectAuthenticationFlowBuilder(
+            "https://your-org.okta.com",
+            "your-client-id",
+            List.of("openid", "profile", "email"))
+        .setAuthorizationServerId("default")
+        .setIntent(DirectAuthenticationIntent.SIGN_IN)
+        .build();
+
+DirectAuthenticationFlow flow = result.getOrThrow();
+```
+
+If your application is registered as a confidential client, authenticate with either `setClientSecret` or, mutually exclusive with it, `setClientAssertionProvider` — invoked fresh for every request the flow makes (including each iteration of an OOB poll) so the returned assertion can carry a unique `jti` and a correctly scoped, non-expired `exp`/`aud`:
+
+```java
+import com.okta.authfoundation.client.ClientAssertion;
+
+DirectAuthResult<DirectAuthenticationFlow> result =
+    new DirectAuthenticationFlowBuilder(
+            "https://your-org.okta.com",
+            "your-client-id",
+            List.of("openid", "profile", "email"))
+        .setClientAssertionProvider(
+            audience ->
+                new ClientAssertion(
+                    "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+                    signJwt("your-client-id", "your-client-id", audience)))
+        .build();
+```
+
+### Starting Authentication (Java)
+
+```java
+import com.okta.directauth.jvm.DirectAuthenticationState;
+import com.okta.directauth.model.PrimaryFactor;
+import java.util.concurrent.CompletableFuture;
+
+// Password
+CompletableFuture<DirectAuthenticationState> future =
+    flow.startAsync("user@example.com", new PrimaryFactor.Password("user-password"));
+
+future.thenAccept(state -> {
+    if (state instanceof DirectAuthenticationState.Authenticated) {
+        DirectAuthenticationState.Authenticated auth =
+            (DirectAuthenticationState.Authenticated) state;
+        String accessToken = auth.getToken().getAccessToken();
+    }
+});
+```
+
+### Handling MFA (Java)
+
+```java
+import com.okta.authfoundation.ChallengeGrantType;
+import com.okta.directauth.jvm.MfaRequired;
+import com.okta.directauth.model.OobChannel;
+import com.okta.directauth.model.SecondaryFactor;
+
+if (state instanceof MfaRequired) {
+    MfaRequired mfaRequired = (MfaRequired) state;
+
+    // Resume with OTP
+    CompletableFuture<DirectAuthenticationState> mfaFuture =
+        mfaRequired.resumeAsync(
+            new PrimaryFactor.Otp("123456"),
+            List.of(ChallengeGrantType.OtpMfa.INSTANCE));
+
+    // Or challenge with Push
+    CompletableFuture<DirectAuthenticationState> challengeFuture =
+        mfaRequired.challengeAsync(
+            new PrimaryFactor.Oob(OobChannel.PUSH),
+            List.of(ChallengeGrantType.OobMfa.INSTANCE));
+}
+```
+
+### Handling Continuations (Java)
+
+```java
+import com.okta.directauth.jvm.OobPendingContinuation;
+import com.okta.directauth.jvm.PromptContinuation;
+import com.okta.directauth.jvm.TransferContinuation;
+
+// OOB Polling
+if (state instanceof OobPendingContinuation) {
+    OobPendingContinuation oob = (OobPendingContinuation) state;
+    CompletableFuture<DirectAuthenticationState> pollFuture = oob.proceedAsync();
+}
+
+// Device Transfer (show binding code, then poll)
+if (state instanceof TransferContinuation) {
+    TransferContinuation transfer = (TransferContinuation) state;
+    String bindingCode = transfer.getBindingCode();
+    CompletableFuture<DirectAuthenticationState> transferFuture = transfer.proceedAsync();
+}
+
+// Prompt (submit additional code)
+if (state instanceof PromptContinuation) {
+    PromptContinuation prompt = (PromptContinuation) state;
+    CompletableFuture<DirectAuthenticationState> promptFuture =
+        prompt.proceedAsync("user-entered-code");
+}
+```
+
+### Handling Errors (Java)
+
+Error states are exposed as subtypes of `DirectAuthenticationState.Error` (a Java-friendly wrapper
+distinct from the Kotlin `DirectAuthenticationError`):
+
+```java
+if (state instanceof DirectAuthenticationState.Error.InternalError) {
+    DirectAuthenticationState.Error.InternalError error =
+        (DirectAuthenticationState.Error.InternalError) state;
+    String errorCode = error.getErrorCode();
+    Throwable throwable = error.getThrowable();
+} else if (state instanceof DirectAuthenticationState.Error.HttpError.Oauth2Error) {
+    DirectAuthenticationState.Error.HttpError.Oauth2Error error =
+        (DirectAuthenticationState.Error.HttpError.Oauth2Error) state;
+    String oauthError = error.getError();
+    String description = error.getErrorDescription();
+} else if (state instanceof DirectAuthenticationState.Error.HttpError.ApiError) {
+    DirectAuthenticationState.Error.HttpError.ApiError error =
+        (DirectAuthenticationState.Error.HttpError.ApiError) state;
+    String errorCode = error.getErrorCode();
+    String errorSummary = error.getErrorSummary();
+}
+```
+
+### Complete Java Example
+
+See the [Java CLI Sample](../okta-direct-auth-java-cli-sample/README.md) for a complete working application demonstrating password authentication, MFA, device transfer, and self-service password recovery using the `CompletableFuture` API.
+
+## Sample Applications
+
+### Kotlin (Compose)
+
+See the `okta-direct-auth-app` module in this repository. It demonstrates:
+
+- Username/password authentication
+- MFA with multiple factors (OTP, Push, SMS, Voice, WebAuthn)
+- WebAuthn/Passkey authentication (primary and MFA)
+- Out-of-band polling with countdown timers
+- Device transfer with binding codes
+- Self-service password recovery
+- Error handling and recovery
+
+### Java (CLI)
+
+See the [okta-direct-auth-java-cli-sample](../okta-direct-auth-java-cli-sample/README.md) module. A pure Java CLI application demonstrating:
+
+- Password authentication with `CompletableFuture` API
+- MFA with OTP, SMS, Voice, and Okta Verify push
+- Device transfer with binding codes
+- Self-service password recovery via MyAccount API
+- JWT token decoding
+
+## Additional Resources
+
+- [CHANGELOG](CHANGELOG.md) - Release history and migration guides
+- [API Documentation](https://okta.github.io/okta-mobile-kotlin/okta-direct-auth/index.html)
+- [Okta Developer Documentation](https://developer.okta.com/docs/guides/configure-direct-auth-grants/)

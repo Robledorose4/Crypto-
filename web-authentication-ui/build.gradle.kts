@@ -1,0 +1,94 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
+plugins {
+    id("com.android.library")
+    alias(libs.plugins.dokka)
+    id("kotlin-parcelize")
+    id("binary-compat-validation")
+    kotlin("plugin.serialization") version libs.versions.kotlin.get()
+    id("com.vanniktech.maven.publish.base")
+    id("spotless")
+}
+
+android {
+    namespace = "com.okta.webauthenticationui"
+    compileSdk { version = release(COMPILE_SDK) }
+
+    defaultConfig {
+        minSdk = MIN_SDK
+
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        consumerProguardFiles("consumer-rules.pro")
+
+        buildConfigField("String", "SDK_VERSION", "\"okta-web-authentication-ui-kotlin/$WEB_AUTHENTICATION_UI_VERSION\"")
+        buildConfigField("String", "VERSION", "\"$WEB_AUTHENTICATION_UI_VERSION\"")
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+    }
+    compileOptions {
+        sourceCompatibility = SOURCE_COMPATIBILITY
+        targetCompatibility = TARGET_COMPATIBILITY
+    }
+
+    buildFeatures {
+        buildConfig = true
+    }
+
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget = JvmTarget.fromTarget(JVM_TARGET)
+        freeCompilerArgs.add("-opt-in=com.okta.authfoundation.InternalAuthFoundationApi")
+    }
+}
+
+androidComponents {
+    onVariants { variant ->
+        variant.hostTests["UnitTest"]?.manifestPlaceholders?.put("webAuthenticationRedirectScheme", "unitTest")
+        variant.androidTest?.manifestPlaceholders?.put("webAuthenticationRedirectScheme", "unitTest")
+    }
+}
+
+binaryCompatValidationExtension {
+    ignoredClasses.add("com.okta.webauthenticationui.BuildConfig")
+}
+
+dependencies {
+    api(libs.kotlin.stdlib)
+    api(libs.okhttp.core)
+    api(libs.okio.core)
+    api(libs.coroutines.android)
+    api(libs.kotlin.serialization.json)
+    api(project(":auth-foundation"))
+    api(project(":oauth2"))
+    api(libs.androidx.browser)
+
+    implementation(libs.lifecycle.viewmodel.ktx)
+    implementation(libs.androidx.activity.ktx)
+    implementation(libs.app.compat)
+    implementation(libs.okio.jvm)
+
+    testImplementation(libs.truth)
+    testImplementation(libs.kotlin.test)
+    testImplementation(libs.coroutines.test)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.bcprov.jdk18on)
+    testImplementation(libs.androidx.test.core)
+    testImplementation(libs.androidx.test.core.ktx)
+    testImplementation(libs.mockito.core)
+    testImplementation(libs.mockito.kotlin)
+    testImplementation(libs.mockk.android)
+    testImplementation(libs.mockk.agent)
+    testImplementation(project(":test-helpers"))
+}

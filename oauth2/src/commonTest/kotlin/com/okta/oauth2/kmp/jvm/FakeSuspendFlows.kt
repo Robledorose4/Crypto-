@@ -1,0 +1,453 @@
+/*
+ * Copyright 2022-Present Okta, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.okta.oauth2.kmp.jvm
+
+import com.okta.authfoundation.client.OAuth2ClientBuilder
+import com.okta.authfoundation.client.OAuth2EndpointOverrides
+import com.okta.authfoundation.client.TokenInfo
+import com.okta.authfoundation.client.dto.IntrospectInfo
+import com.okta.authfoundation.client.dto.OidcUserInfo
+import com.okta.authfoundation.client.kmp.OAuth2Client
+import com.okta.authfoundation.credential.RevokeTokenType
+import com.okta.authfoundation.credential.TokenType
+import com.okta.authfoundation.credential.kmp.Credential
+import com.okta.authfoundation.jwt.Jwt
+import com.okta.oauth2.kmp.AuthorizationCodeFlowContext
+import com.okta.oauth2.kmp.BrowserRedirectHandler
+import com.okta.oauth2.kmp.DeviceAuthorizationFlowContext
+import com.okta.oauth2.kmp.FakeTokenInfo
+import com.okta.oauth2.kmp.IdJagAssertion
+import com.okta.oauth2.kmp.RedirectEndSessionFlowContext
+import com.okta.oauth2.kmp.RoutingApiExecutor
+import com.okta.oauth2.kmp.SubjectAssertion
+import kotlinx.coroutines.flow.Flow
+import com.okta.oauth2.kmp.AuthorizationCodeFlow as KotlinAuthorizationCodeFlow
+import com.okta.oauth2.kmp.CrossAppAccessFlow as KotlinCrossAppAccessFlow
+import com.okta.oauth2.kmp.DeviceAuthorizationFlow as KotlinDeviceAuthorizationFlow
+import com.okta.oauth2.kmp.RedirectEndSessionFlow as KotlinRedirectEndSessionFlow
+import com.okta.oauth2.kmp.ResourceOwnerFlow as KotlinResourceOwnerFlow
+import com.okta.oauth2.kmp.SessionTokenFlow as KotlinSessionTokenFlow
+import com.okta.oauth2.kmp.TokenExchangeFlow as KotlinTokenExchangeFlow
+
+/**
+ * Kotlin bridge providing fake suspend-interface implementations for Java tests.
+ *
+ * Java test files cannot implement Kotlin suspend interfaces directly,
+ * so this Kotlin object provides the anonymous-object delegates that the
+ * Java [TestFlowFactory] passes to each flow's constructor.
+ */
+internal object FakeSuspendFlows {
+    private val fakeClient: OAuth2Client =
+        OAuth2ClientBuilder
+            .create(
+                issuerUrl = "https://example.okta.com",
+                clientId = "test-client-id",
+                scope = listOf("openid")
+            ).getOrThrow()
+
+    @JvmStatic
+    fun successResourceOwnerDelegate(): KotlinResourceOwnerFlow =
+        object : KotlinResourceOwnerFlow {
+            override val client: OAuth2Client = fakeClient
+
+            override suspend fun start(
+                username: String,
+                password: String,
+                scope: List<String>,
+            ): Result<TokenInfo> = Result.success(FakeTokenInfo())
+        }
+
+    @JvmStatic
+    fun failingResourceOwnerDelegate(): KotlinResourceOwnerFlow =
+        object : KotlinResourceOwnerFlow {
+            override val client: OAuth2Client = fakeClient
+
+            override suspend fun start(
+                username: String,
+                password: String,
+                scope: List<String>,
+            ): Result<TokenInfo> = Result.failure(IllegalArgumentException("invalid_grant"))
+        }
+
+    @JvmStatic
+    fun successDeviceAuthorizationDelegate(): KotlinDeviceAuthorizationFlow =
+        object : KotlinDeviceAuthorizationFlow {
+            override val client: OAuth2Client = fakeClient
+
+            override suspend fun start(scope: List<String>): Result<DeviceAuthorizationFlowContext> =
+                Result.success(
+                    DeviceAuthorizationFlowContext(
+                        verificationUri = "https://example.okta.com/activate",
+                        verificationUriComplete = "https://example.okta.com/activate?user_code=ABCD-1234",
+                        userCode = "ABCD-1234",
+                        expiresIn = 600,
+                        deviceCode = "device-code-xyz",
+                        interval = 5
+                    )
+                )
+
+            override suspend fun resume(flowContext: DeviceAuthorizationFlowContext): Result<TokenInfo> = Result.success(FakeTokenInfo())
+        }
+
+    @JvmStatic
+    fun failingDeviceAuthorizationDelegate(): KotlinDeviceAuthorizationFlow =
+        object : KotlinDeviceAuthorizationFlow {
+            override val client: OAuth2Client = fakeClient
+
+            override suspend fun start(scope: List<String>): Result<DeviceAuthorizationFlowContext> = Result.failure(IllegalStateException("OIDC Endpoints not available."))
+
+            override suspend fun resume(flowContext: DeviceAuthorizationFlowContext): Result<TokenInfo> = Result.failure(IllegalStateException("access_denied"))
+        }
+
+    @JvmStatic
+    fun successTokenExchangeDelegate(): KotlinTokenExchangeFlow =
+        object : KotlinTokenExchangeFlow {
+            override val client: OAuth2Client = fakeClient
+
+            override suspend fun start(
+                idToken: String,
+                deviceSecret: String,
+                scope: List<String>,
+                audience: String?,
+            ): Result<TokenInfo> = Result.success(FakeTokenInfo())
+        }
+
+    @JvmStatic
+    fun failingTokenExchangeDelegate(): KotlinTokenExchangeFlow =
+        object : KotlinTokenExchangeFlow {
+            override val client: OAuth2Client = fakeClient
+
+            override suspend fun start(
+                idToken: String,
+                deviceSecret: String,
+                scope: List<String>,
+                audience: String?,
+            ): Result<TokenInfo> = Result.failure(IllegalStateException("invalid_grant"))
+        }
+
+    @JvmStatic
+    fun successSessionTokenDelegate(): KotlinSessionTokenFlow =
+        object : KotlinSessionTokenFlow {
+            override val client: OAuth2Client = fakeClient
+
+            override suspend fun start(
+                sessionToken: String,
+                redirectUrl: String,
+                scope: List<String>,
+                extraRequestParameters: Map<String, String>,
+            ): Result<TokenInfo> = Result.success(FakeTokenInfo())
+        }
+
+    @JvmStatic
+    fun failingSessionTokenDelegate(): KotlinSessionTokenFlow =
+        object : KotlinSessionTokenFlow {
+            override val client: OAuth2Client = fakeClient
+
+            override suspend fun start(
+                sessionToken: String,
+                redirectUrl: String,
+                scope: List<String>,
+                extraRequestParameters: Map<String, String>,
+            ): Result<TokenInfo> = Result.failure(IllegalStateException("OIDC Endpoints not available."))
+        }
+
+    @JvmStatic
+    fun successRedirectEndSessionDelegate(redirectUri: String): KotlinRedirectEndSessionFlow =
+        object : KotlinRedirectEndSessionFlow {
+            override val client: OAuth2Client = fakeClient
+
+            override suspend fun start(
+                idToken: String,
+                redirectUrl: String,
+                extraRequestParameters: Map<String, String>,
+            ): Result<RedirectEndSessionFlowContext> =
+                Result.success(
+                    RedirectEndSessionFlowContext(
+                        url = "https://example.okta.com/logout?id_token_hint=$idToken",
+                        redirectUrl = redirectUri,
+                        state = "test-state"
+                    )
+                )
+
+            override fun resume(
+                uri: String,
+                flowContext: RedirectEndSessionFlowContext,
+            ): Result<Unit> = Result.success(Unit)
+        }
+
+    @JvmStatic
+    fun failingRedirectEndSessionDelegate(): KotlinRedirectEndSessionFlow =
+        object : KotlinRedirectEndSessionFlow {
+            override val client: OAuth2Client = fakeClient
+
+            override suspend fun start(
+                idToken: String,
+                redirectUrl: String,
+                extraRequestParameters: Map<String, String>,
+            ): Result<RedirectEndSessionFlowContext> = Result.failure(IllegalStateException("OIDC Endpoints not available."))
+
+            override fun resume(
+                uri: String,
+                flowContext: RedirectEndSessionFlowContext,
+            ): Result<Unit> = Result.failure(KotlinRedirectEndSessionFlow.ResumeException("access_denied"))
+        }
+
+    @JvmStatic
+    fun fakeBrowserRedirectHandler(redirectUri: String): BrowserRedirectHandler =
+        object : BrowserRedirectHandler {
+            override suspend fun handleRedirect(url: String): String = redirectUri
+        }
+
+    @JvmStatic
+    fun successAuthorizationCodeDelegate(): KotlinAuthorizationCodeFlow =
+        object : KotlinAuthorizationCodeFlow {
+            override val client: OAuth2Client = fakeClient
+
+            override suspend fun start(
+                redirectUrl: String,
+                scope: List<String>,
+                extraRequestParameters: Map<String, String>,
+            ): Result<AuthorizationCodeFlowContext> =
+                Result.success(
+                    AuthorizationCodeFlowContext(
+                        url = "https://example.okta.com/authorize?response_type=code",
+                        redirectUrl = redirectUrl,
+                        codeVerifier = "test-code-verifier",
+                        state = "test-state",
+                        nonce = "test-nonce",
+                        maxAge = null
+                    )
+                )
+
+            override suspend fun resume(
+                uri: String,
+                flowContext: AuthorizationCodeFlowContext,
+            ): Result<TokenInfo> = Result.success(FakeTokenInfo())
+        }
+
+    @JvmStatic
+    fun failingAuthorizationCodeDelegate(): KotlinAuthorizationCodeFlow =
+        object : KotlinAuthorizationCodeFlow {
+            override val client: OAuth2Client = fakeClient
+
+            override suspend fun start(
+                redirectUrl: String,
+                scope: List<String>,
+                extraRequestParameters: Map<String, String>,
+            ): Result<AuthorizationCodeFlowContext> = Result.failure(IllegalStateException("OIDC Endpoints not available."))
+
+            override suspend fun resume(
+                uri: String,
+                flowContext: AuthorizationCodeFlowContext,
+            ): Result<TokenInfo> = Result.failure(IllegalStateException("OIDC Endpoints not available."))
+        }
+
+    @JvmStatic
+    fun parRequiredAuthorizationCodeDelegate(): KotlinAuthorizationCodeFlow =
+        object : KotlinAuthorizationCodeFlow {
+            override val client: OAuth2Client = fakeClient
+
+            override suspend fun start(
+                redirectUrl: String,
+                scope: List<String>,
+                extraRequestParameters: Map<String, String>,
+            ): Result<AuthorizationCodeFlowContext> =
+                Result.failure(
+                    KotlinAuthorizationCodeFlow.PushedAuthorizationRequiredException(
+                        "Authorization server requires PAR, but no pushed_authorization_request_endpoint was discovered."
+                    )
+                )
+
+            override suspend fun resume(
+                uri: String,
+                flowContext: AuthorizationCodeFlowContext,
+            ): Result<TokenInfo> = Result.failure(IllegalStateException("start() should have failed before resume() was called."))
+        }
+
+    @JvmStatic
+    fun successCrossAppAccessDelegate(): KotlinCrossAppAccessFlow =
+        object : KotlinCrossAppAccessFlow {
+            override val idpClient: OAuth2Client = fakeClient
+            override val targetClient: OAuth2Client = fakeClient
+
+            override suspend fun start(
+                subjectAssertion: SubjectAssertion,
+                scope: List<String>?,
+            ): Result<IdJagAssertion> = Result.success(IdJagAssertion.restore(value = "fake-id-jag", audience = "https://example.okta.com", expiresIn = 300, issuedAt = 0L))
+
+            override suspend fun redeem(idJag: IdJagAssertion): Result<com.okta.authfoundation.client.TokenInfo> = Result.success(FakeTokenInfo())
+
+            override suspend fun exchange(
+                subjectAssertion: SubjectAssertion,
+                scope: List<String>?,
+            ): Result<com.okta.authfoundation.client.TokenInfo> = Result.success(FakeTokenInfo())
+
+            override fun toString(): String = "CrossAppAccessFlow(idp=https://example.okta.com, target=https://example.okta.com)"
+        }
+
+    @JvmStatic
+    fun failingCrossAppAccessDelegate(): KotlinCrossAppAccessFlow =
+        object : KotlinCrossAppAccessFlow {
+            override val idpClient: OAuth2Client = fakeClient
+            override val targetClient: OAuth2Client = fakeClient
+
+            override suspend fun start(
+                subjectAssertion: SubjectAssertion,
+                scope: List<String>?,
+            ): Result<IdJagAssertion> = Result.failure(IllegalStateException("access_denied"))
+
+            override suspend fun redeem(idJag: IdJagAssertion): Result<com.okta.authfoundation.client.TokenInfo> = Result.failure(IllegalStateException("invalid_grant"))
+
+            override suspend fun exchange(
+                subjectAssertion: SubjectAssertion,
+                scope: List<String>?,
+            ): Result<com.okta.authfoundation.client.TokenInfo> = Result.failure(IllegalStateException("access_denied"))
+
+            override fun toString(): String = "CrossAppAccessFlow(idp=https://example.okta.com, target=https://example.okta.com)"
+        }
+
+    /**
+     * A [KotlinCrossAppAccessFlow] whose [KotlinCrossAppAccessFlow.targetClient] is wired to a
+     * stubbed introspection endpoint returning `{"active": [active]}` — for testing the Java
+     * wrapper's `introspectResourceToken`, which calls `targetClient.introspectToken` directly
+     * rather than through a delegate method this object could otherwise fake.
+     */
+    @JvmStatic
+    fun crossAppAccessDelegateWithIntrospectableTarget(active: Boolean): KotlinCrossAppAccessFlow {
+        val targetIssuer = "https://introspectable-target.example.com"
+        val introspectionEndpoint = "$targetIssuer/v1/introspect"
+        val executor = RoutingApiExecutor()
+        executor.stub(
+            "$targetIssuer/.well-known/openid-configuration",
+            200,
+            """{"issuer":"$targetIssuer","authorization_endpoint":"$targetIssuer/v1/authorize","token_endpoint":"$targetIssuer/v1/token"}"""
+        )
+        executor.stub(introspectionEndpoint, 200, """{"active":$active}""")
+        val introspectableTargetClient =
+            OAuth2ClientBuilder
+                .create(
+                    issuerUrl = targetIssuer,
+                    clientId = "test-client-id",
+                    scope = listOf("openid")
+                ) {
+                    apiExecutor = executor
+                    endpointOverrides = OAuth2EndpointOverrides(introspectionEndpoint = introspectionEndpoint)
+                }.getOrThrow()
+        return object : KotlinCrossAppAccessFlow {
+            override val idpClient: OAuth2Client = fakeClient
+            override val targetClient: OAuth2Client = introspectableTargetClient
+
+            override suspend fun start(
+                subjectAssertion: SubjectAssertion,
+                scope: List<String>?,
+            ): Result<IdJagAssertion> = notImplemented()
+
+            override suspend fun redeem(idJag: IdJagAssertion): Result<com.okta.authfoundation.client.TokenInfo> = notImplemented()
+
+            override suspend fun exchange(
+                subjectAssertion: SubjectAssertion,
+                scope: List<String>?,
+            ): Result<com.okta.authfoundation.client.TokenInfo> = notImplemented()
+
+            override fun toString(): String = "CrossAppAccessFlow(idp=https://example.okta.com, target=https://introspectable-target.example.com)"
+
+            private fun notImplemented(): Nothing = throw NotImplementedError("not used by this test")
+        }
+    }
+
+    /**
+     * A fake [Credential] holding [idToken], for Java tests that cannot implement the
+     * commonMain `Credential` interface directly (it has suspend members).
+     */
+    @JvmStatic
+    fun fakeCredentialWithIdToken(idToken: String): Credential = fakeCredential(idToken = idToken)
+
+    /**
+     * A fake [Credential] with no ID token — deriving a Cross App Access subject from it fails
+     * before any network request, since the default subject type is the ID token.
+     */
+    @JvmStatic
+    fun fakeCredentialWithNoIdToken(): Credential = fakeCredential(idToken = null)
+
+    private fun fakeCredential(idToken: String?): Credential =
+        object : Credential {
+            override val id: String = "fake-credential-id"
+            override val token: TokenInfo =
+                object : TokenInfo {
+                    override val id: String = "fake-token-id"
+                    override val clientId: String = "fake-client-id"
+                    override val issuerUrl: String = "https://example.okta.com"
+                    override val tokenType: String = "Bearer"
+                    override val expiresIn: Int = 3600
+                    override val accessToken: String = "fake-access-token"
+                    override val scope: String? = "openid"
+                    override val refreshToken: String? = null
+                    override val idToken: String? = idToken
+                    override val deviceSecret: String? = null
+                    override val issuedTokenType: String? = null
+                }
+            override val tags: Map<String, String> = emptyMap()
+
+            override suspend fun deleteAsync(): Result<Unit> = notImplemented()
+
+            override fun getTokenFlow(): Flow<TokenInfo> = notImplemented()
+
+            override suspend fun getUserInfo(): Result<OidcUserInfo> = notImplemented()
+
+            override suspend fun revokeToken(tokenType: RevokeTokenType): Result<Unit> = notImplemented()
+
+            override suspend fun revokeAllTokens(): Result<Unit> = notImplemented()
+
+            override suspend fun refreshIfExpired(): Result<Credential> = notImplemented()
+
+            override fun accessTokenIfNotExpired(): String? = notImplemented()
+
+            override suspend fun setTagsAsync(tags: Map<String, String>): Result<Credential> = notImplemented()
+
+            override suspend fun introspectToken(tokenType: TokenType): Result<IntrospectInfo> = notImplemented()
+
+            override suspend fun refreshToken(): Result<Credential> = notImplemented()
+
+            override fun idToken(): Result<Jwt> = notImplemented()
+
+            override fun scope(): List<String> = notImplemented()
+
+            private fun notImplemented(): Nothing = throw NotImplementedError("not used by this test")
+        }
+
+    @JvmStatic
+    fun parRequestFailedAuthorizationCodeDelegate(): KotlinAuthorizationCodeFlow =
+        object : KotlinAuthorizationCodeFlow {
+            override val client: OAuth2Client = fakeClient
+
+            override suspend fun start(
+                redirectUrl: String,
+                scope: List<String>,
+                extraRequestParameters: Map<String, String>,
+            ): Result<AuthorizationCodeFlowContext> =
+                Result.failure(
+                    KotlinAuthorizationCodeFlow.PushedAuthorizationRequestException(
+                        "Pushed Authorization Request failed and fallback is not allowed.",
+                        IllegalStateException("PAR endpoint returned 500.")
+                    )
+                )
+
+            override suspend fun resume(
+                uri: String,
+                flowContext: AuthorizationCodeFlowContext,
+            ): Result<TokenInfo> = Result.failure(IllegalStateException("start() should have failed before resume() was called."))
+        }
+}
